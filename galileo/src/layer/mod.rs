@@ -19,6 +19,9 @@ pub mod raster_tile_layer;
 pub(crate) mod tiles;
 pub mod vector_tile_layer;
 
+#[cfg(feature = "pmtiles")]
+pub mod pmtiles;
+
 pub use feature_layer::{FeatureId, FeatureLayer};
 pub use raster_tile_layer::RasterTileLayer;
 pub use vector_tile_layer::VectorTileLayer;
