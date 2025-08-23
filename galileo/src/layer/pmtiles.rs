@@ -1,12 +1,14 @@
 //! PMTiles support for Galileo
 
+use std::collections::HashMap;
 use std::io::Read;
+use std::sync::{Arc, RwLock};
 
 use bytes::Bytes;
 use flate2::read::GzDecoder;
 use galileo_mvt::MvtTile;
 use log::error;
-use pmtiles::TileCoord;
+use pmtiles::{DirCacheResult, Directory, DirectoryCache, TileCoord, TileId};
 
 use crate::decoded_image::DecodedImage;
 use crate::error::GalileoError;
@@ -15,14 +17,49 @@ use crate::layer::vector_tile_layer::tile_provider::loader::{TileLoadError, Vect
 use crate::platform::PlatformService;
 use crate::tile_schema::TileIndex;
 
-/// Tile loader for PMTiles format using HTTP backend
-pub struct PmtilesTileLoader {
-    reader: pmtiles::AsyncPmTilesReader<pmtiles::HttpBackend>,
+/// A simple HashMap-based implementation of the `pmtiles::DirectoryCache` trait.
+#[derive(Default, Clone)]
+pub struct PmtilesDirCache {
+    cache: Arc<RwLock<HashMap<usize, Directory>>>,
 }
 
-impl PmtilesTileLoader {
+impl PmtilesDirCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl DirectoryCache for PmtilesDirCache {
+    async fn get_dir_entry(&self, offset: usize, tile_id: TileId) -> DirCacheResult {
+        #[allow(clippy::unwrap_used)]
+        if let Some(dir) = self.cache.read().unwrap().get(&offset) {
+            if let Some(entry) = dir.find_tile_id(tile_id) {
+                return DirCacheResult::Found(entry.clone());
+            } else {
+                return DirCacheResult::NotFound;
+            }
+        }
+        DirCacheResult::NotCached
+    }
+
+    async fn insert_dir(&self, offset: usize, directory: Directory) {
+        #[allow(clippy::unwrap_used)]
+        self.cache.write().unwrap().insert(offset, directory);
+    }
+}
+
+/// Tile loader for PMTiles format using an async backend (e.g., HTTP)
+pub struct PmtilesTileLoader<B = pmtiles::HttpBackend, C = pmtiles::NoCache> {
+    reader: pmtiles::AsyncPmTilesReader<B, C>,
+}
+
+impl<B, C> PmtilesTileLoader<B, C>
+where
+    B: pmtiles::AsyncBackend + Send + Sync,
+    C: DirectoryCache + Send + Sync,
+{
     /// Creates a new PMTiles tile loader with the given reader
-    pub fn new(reader: pmtiles::AsyncPmTilesReader<pmtiles::HttpBackend>) -> Self {
+    pub fn new(reader: pmtiles::AsyncPmTilesReader<B, C>) -> Self {
         Self { reader }
     }
 
@@ -40,7 +77,11 @@ impl PmtilesTileLoader {
 
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-impl RasterTileLoader for PmtilesTileLoader {
+impl<B, C> RasterTileLoader for PmtilesTileLoader<B, C>
+where
+    B: pmtiles::AsyncBackend + Send + Sync,
+    C: DirectoryCache + Send + Sync + maybe_sync::MaybeSend + maybe_sync::MaybeSync,
+{
     async fn load(&self, index: TileIndex) -> Result<DecodedImage, GalileoError> {
         let bytes = self.get_tile(index).await?;
         crate::platform::instance().decode_image(bytes).await
@@ -49,7 +90,11 @@ impl RasterTileLoader for PmtilesTileLoader {
 
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-impl VectorTileLoader for PmtilesTileLoader {
+impl<B, C> VectorTileLoader for PmtilesTileLoader<B, C>
+where
+    B: pmtiles::AsyncBackend + Send + Sync,
+    C: DirectoryCache + Send + Sync + maybe_sync::MaybeSend + maybe_sync::MaybeSync,
+{
     async fn load(&self, index: TileIndex) -> Result<MvtTile, TileLoadError> {
         let bytes = self
             .get_tile(index)

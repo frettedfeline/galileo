@@ -124,7 +124,16 @@ impl VectorTileLayerBuilder {
 
     #[cfg(feature = "pmtiles")]
     /// Initializes a builder for a layer that loads tiles from a pmtiles file.
-    pub fn new_pmtiles(loader: PmtilesTileLoader, tile_schema: TileSchema) -> Self {
+    pub fn new_pmtiles<B, C>(loader: PmtilesTileLoader<B, C>, tile_schema: TileSchema) -> Self
+    where
+        B: pmtiles::AsyncBackend + Send + Sync + 'static,
+        C: pmtiles::DirectoryCache
+            + Send
+            + Sync
+            + maybe_sync::MaybeSend
+            + maybe_sync::MaybeSync
+            + 'static,
+    {
         let provider = VectorTileProvider::new(
             Arc::new(loader),
             Arc::new(Self::create_processor(tile_schema.clone())),

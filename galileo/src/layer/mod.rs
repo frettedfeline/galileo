@@ -21,6 +21,8 @@ pub mod vector_tile_layer;
 
 #[cfg(feature = "pmtiles")]
 pub mod pmtiles;
+#[cfg(feature = "pmtiles")]
+pub mod pmtiles_http_cache;
 
 pub use feature_layer::{FeatureId, FeatureLayer};
 pub use raster_tile_layer::RasterTileLayer;
