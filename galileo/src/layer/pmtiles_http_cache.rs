@@ -1,3 +1,9 @@
+//! An HTTP range-request backend with persistent on-disk cache for PMTiles.
+//!
+//! This module provides [`CachedHttpBackend`], an implementation of the
+//! [`pmtiles::AsyncBackend`] trait that fetches byte ranges over HTTP and stores
+//! them on disk for reuse. It also includes a small helper to prefetch tiles.
+
 use std::path::{Path, PathBuf};
 
 use bytes::Bytes;
@@ -6,9 +12,9 @@ use pmtiles::{AsyncBackend, AsyncPmTilesReader, DirectoryCache, PmtError, PmtRes
 use sled::{Db, Tree};
 use tokio::sync::Semaphore;
 use std::sync::Arc;
-use galileo_types::cartesian::CartesianPoint2d;
 
 use crate::tile_schema::{TileIndex, TileSchema, VerticalDirection};
+use galileo_types::cartesian::CartesianPoint2d;
 
 /// A persistent file-backed HTTP range cache for PMTiles AsyncBackend.
 /// Stores each requested range as a file named "{offset}-{length}" under a folder derived from the URL.
@@ -16,13 +22,24 @@ use crate::tile_schema::{TileIndex, TileSchema, VerticalDirection};
 pub struct CachedHttpBackend {
     client: Client,
     url: Url,
-    cache_root: PathBuf,
     url_folder: PathBuf,
-    db: Db,
+    /// Sled tree used to index cached byte ranges for this URL.
     tree: Tree,
+    /// Keep the sled database handle alive for the lifetime of the backend.
+    ///
+    /// The handle is intentionally not read after initialization, but it must be
+    /// held so that the opened tree remains valid. See sled documentation for
+    /// details.
+    #[allow(dead_code)]
+    db: Db,
 }
 
 impl CachedHttpBackend {
+    /// Creates a new cached HTTP backend for the given URL and cache root folder.
+    ///
+    /// The cache stores each requested byte range as a file under a URL-specific
+    /// directory inside `cache_root`. A small sled index tracks which ranges are
+    /// present to minimize network requests.
     pub fn try_from(client: Client, url: impl pmtiles::reqwest::IntoUrl, cache_root: impl AsRef<Path>) -> PmtResult<Self> {
         let url = url.into_url()?;
         let cache_root = cache_root.as_ref().to_path_buf();
@@ -33,7 +50,7 @@ impl CachedHttpBackend {
         let tree = db
             .open_tree(sanitize_for_fs(url.as_str()))
             .map_err(|e| PmtError::Reading(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
-        Ok(Self { client, url, cache_root, url_folder, db, tree })
+        Ok(Self { client, url, url_folder, tree, db })
     }
 
     fn range_path(&self, offset: usize, length: usize) -> PathBuf {
@@ -144,9 +161,13 @@ fn decode_u64(b: &[u8]) -> u64 { let mut arr = [0u8; 8]; arr.copy_from_slice(&b[
 fn encode_len(v: u64) -> Vec<u8> { v.to_be_bytes().to_vec() }
 fn decode_len(b: &[u8]) -> u64 { decode_u64(b) }
 
+/// Configuration for background tile prefetch.
 pub struct PrefetchConfig {
+    /// Zoom levels to prefetch (e.g. 0..=5).
     pub zoom_levels: Vec<u8>,
+    /// Optional bounding box to limit prefetch area; if `None` the full schema bounds are used.
     pub bbox: Option<galileo_types::cartesian::Rect>,
+    /// Maximum number of concurrent tile requests.
     pub concurrency: usize,
 }
 
@@ -158,7 +179,7 @@ impl Default for PrefetchConfig {
 }
 
 /// Spawns background prefetch of specified zoom levels over optional bbox using a fresh reader
-/// backed by CachedHttpBackend. The app remains responsive.
+/// backed by [`CachedHttpBackend`]. The app remains responsive.
 pub async fn spawn_prefetch_for_url<C: DirectoryCache + Send + Sync + 'static>(
     cache_root: impl AsRef<Path>,
     client: Client,
